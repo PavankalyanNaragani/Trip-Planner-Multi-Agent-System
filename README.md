@@ -1,127 +1,87 @@
-# ✈️ Trip-Planner-Multi-Agent-System — A Multi-Agent Travel Planner with LangGraph
+# Multi-Agent-System-using-LangGraph-MCP-Supervisor-Guardrails-HITL
 
-An open-source AI travel planner that turns a natural-language trip request into a practical travel plan with flight suggestions, hotel ideas, and a day-by-day itinerary. The project uses a multi-agent workflow built with LangGraph, LangChain, and FastAPI.
+A demo multi-agent system that uses LangGraph and MCP to implement a travel-planning assistant with a Supervisor, input Guardrails, and Human-In-The-Loop (HITL) approval flows. The project includes a FastAPI frontend, example MCP server, and client helpers to demonstrate how agents, supervisors, and guardrails can be composed into a safe, reviewable planning pipeline.
 
-## Why this project?
+Key ideas:
+- Multi-agent coordination using LangGraph and MCP
+- Supervisor agent to manage complex workflows
+- Input guardrails to validate user requests
+- Human-in-the-loop approval for generated plans
 
-Planning a trip usually means jumping between multiple websites, tools, and spreadsheets. This project brings that flow into one experience by combining:
+Contents
+- `app.py`: FastAPI web frontend and API endpoints
+- `backend.py`: core agent orchestration / travel-planner logic
+- `mcp_client.py`: client helpers to interact with the MCP server
+- `custom_weather_mcp_server.py`: example MCP server for weather checks
+- `templates/`, `static/`: frontend UI assets (HTML, JS, CSS)
 
-- a flight-search agent,
-- a hotel-research agent,
-- an itinerary-planning agent, and
-- a final response agent,
+Features
+- Interactive web UI for sending travel planning prompts
+- Endpoint for drafting travel plans and separate approval endpoint
+- Example MCP server demonstrating domain adapters (weather, checkpoints)
 
-all coordinated through a LangGraph workflow.
+Prerequisites
+- Python 3.10+ (recommended)
+- Git (to clone the repo)
+- A virtual environment tool (venv) or similar
 
-## Features
+Quick start (Windows)
 
-- ✈️ Flight research using AviationStack
-- 🏨 Hotel suggestions using Tavily search
-- 🧠 Multi-agent orchestration with LangGraph
-- 📝 Structured travel itinerary generation
-- 🌐 FastAPI backend with a simple web interface
-- 💾 Conversation state persistence using PostgreSQL
-- ⚡ LLM-powered responses with Groq
+1. Create and activate a virtual environment
 
-## Tech Stack
-
-- Python 3.10+
-- FastAPI
-- Jinja2 + HTML/CSS/JavaScript frontend
-- LangGraph
-- LangChain
-- Groq LLMs
-- PostgreSQL
-- Tavily API
-- AviationStack API
-
-## Project Structure
-
-```text
-.
-├── app.py                # FastAPI app entry point
-├── backend.py            # LangGraph travel workflow
-├── requirements.txt      # Python dependencies
-├── static/               # Static frontend assets
-├── templates/            # HTML templates
-└── tools/                # Flight and web search integrations
-```
-
-## Prerequisites
-
-Before running the project locally, make sure you have:
-
-- Python 3.10 or newer installed
-- PostgreSQL running and accessible
-- API keys for:
-  - Groq
-  - Tavily
-  - AviationStack
-
-## Environment Variables
-
-Create a .env file in the project root with the following variables:
-
-```env
-DATABASE_URL=postgresql://user:password@localhost:5432/travel_db
-GROQ_API_KEY=your_groq_api_key
-AVIATIONSTACK_API_KEY=your_aviationstack_api_key
-TAVILY_API_KEY=your_tavily_api_key
-DEFAULT_ORIGIN_IATA=DAC
-```
-
-## Installation
-
-```bash
+```powershell
 python -m venv .venv
-source .venv/bin/activate   # On Windows: .venv\Scripts\activate
+.venv\Scripts\Activate.ps1    # PowerShell
+```
+
+2. Install dependencies
+
+```powershell
 pip install -r requirements.txt
 ```
 
-## Running the App
+3. Run the FastAPI app (development)
 
-Start the FastAPI server:
-
-```bash
+```powershell
+# option A (run module)
 python app.py
+
+# option B (uvicorn)
+uvicorn app:app --reload --host 127.0.0.1 --port 8000
 ```
 
-Then open your browser at:
+4. Open the web UI
 
-```text
-http://127.0.0.1:8000/
+Visit http://127.0.0.1:8000 in your browser to use the TripMate frontend.
+
+Running the MCP server (example)
+- The repository includes `custom_weather_mcp_server.py` as an example MCP server. Run it in a separate terminal if you want to experiment with custom adapters used by the demo.
+
+```powershell
+# start example MCP server (if needed)
+python custom_weather_mcp_server.py
 ```
 
-## API Endpoints
+API Endpoints
+- `POST /api/travel` — create or resume a travel planning thread. JSON: `{ "message": "<user prompt>", "thread_id": "optional-thread-id" }`
+- `POST /api/travel/approve` — approve or request revisions for a draft. JSON: `{ "thread_id": "<id>", "approved": true|false, "feedback": "optional" }`
+- `GET /health` — basic health check and features list
 
-- GET /health - Health check
-- POST /api/travel - Submit a travel request
+Configuration & environment
+- Secrets and API keys are not included in the repo. Use environment variables or a `.env` file for any required keys consumed by `langgraph`, `langchain`, or other adapters.
 
-Example request:
+Development notes
+- The project keeps synchronous convenience wrappers in `backend.py` while running an async FastAPI server — `nest_asyncio` is applied in `app.py` to allow the sync helpers to call async MCP helpers.
+- Tests are not included; to experiment, interact with the web UI or call the API endpoints directly.
 
-```bash
-curl -X POST http://127.0.0.1:8000/api/travel \
-  -H "Content-Type: application/json" \
-  -d '{"message":"Plan a 3-day trip to Tokyo with a budget of $1200"}'
-```
+Contributing
+- Contributions are welcome. Please open issues or pull requests for bug fixes, documentation improvements, or new adapter examples.
 
-## How the Workflow Works
+License
+- This repository follows the license in the `LICENSE` file.
 
-1. The user submits a travel request.
-2. The flight agent gathers flight-related information.
-3. The hotel agent searches for accommodation suggestions.
-4. The itinerary agent creates a practical travel plan.
-5. The final agent formats the result into a polished response.
+Acknowledgements
+- Built as a demonstration of LangGraph + MCP patterns with supervisor and guardrail concepts.
 
-## Contributing
-
-Contributions are welcome. If you want to improve the app, add new travel features, or fix issues:
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Open a pull request
-
-## Acknowledgments
-
-This project is built with the help of modern LLM tooling and travel APIs, and it is intended as a practical example of combining LangGraph agents with real-world applications.
+Contact
+- For questions or suggestions, open an issue or contact the repository owner.
