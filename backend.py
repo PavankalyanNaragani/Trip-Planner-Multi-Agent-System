@@ -398,11 +398,11 @@ def hotel_agent(state: TravelState):
 # Weather Agent - original behavior kept
 # =========================
 def weather_agent(state: TravelState):
-    city = extract_destination(
-        state["user_query"]
-    )
-
     try:
+        city = extract_destination(
+            state["user_query"]
+        )
+
         weather_data = asyncio.run(
             weather_mcp_search(city)
         )
@@ -427,7 +427,7 @@ Forecast:
         )
 
         weather_results = (
-            f"Live weather information for {city} "
+            "Live weather information "
             "is temporarily unavailable. Give general "
             "seasonal guidance and advise the traveler "
             "to verify the forecast before departure."
@@ -884,6 +884,12 @@ def stream_run_travel_agent(user_input: str, thread_id: str | None = None):
             stream_mode="updates",
         ):
             for node_name, node_data in chunk.items():
+                # Human review pauses the graph with an interrupt tuple. The
+                # pause is handled from the persisted graph state below, so it
+                # must not be treated as a normal node-update dictionary.
+                if node_name == "__interrupt__" or not isinstance(node_data, dict):
+                    continue
+
                 message = f"Node '{node_name}' completed execution."
                 if node_name == "supervisor":
                     message = "Supervisor reviewed query constraints and completed routing."
