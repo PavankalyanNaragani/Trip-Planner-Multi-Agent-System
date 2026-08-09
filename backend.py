@@ -841,3 +841,177 @@ def resume_travel_agent(
     )
 
     return _serialize_result(result, thread_id)
+
+
+def stream_run_travel_agent(user_input: str, thread_id: str | None = None):
+    """Start a new travel-planning run and yield intermediate nodes in real-time."""
+    import traceback
+    if not thread_id:
+        thread_id = f"user_{uuid.uuid4().hex}"
+
+    config = {"configurable": {"thread_id": thread_id}}
+
+    yield {
+        "type": "start",
+        "thread_id": thread_id,
+        "message": f"Initializing LangGraph multi-agent flow (Thread: {thread_id})..."
+    }
+
+    inputs = {
+        "messages": [HumanMessage(content=user_input)],
+        "user_query": user_input,
+        "guardrail_allowed": True,
+        "guardrail_reason": "",
+        "selected_agents": [],
+        "trip_constraints": _empty_constraints(),
+        "supervisor_reasoning": "",
+        "flight_results": "",
+        "hotel_results": "",
+        "weather_results": "",
+        "budget_results": "",
+        "itinerary": "",
+        "approval_request": "",
+        "approved": False,
+        "human_feedback": "",
+        "final_response": "",
+        "llm_calls": 0,
+    }
+
+    try:
+        for chunk in travel_graph.stream(
+            inputs,
+            config=config,
+            stream_mode="updates",
+        ):
+            for node_name, node_data in chunk.items():
+                message = f"Node '{node_name}' completed execution."
+                if node_name == "supervisor":
+                    message = "Supervisor reviewed query constraints and completed routing."
+                elif node_name == "flight_agent":
+                    message = "Flight Agent gathered route recommendations and estimates."
+                elif node_name == "hotel_agent":
+                    message = "Hotel Agent finished neighborhood and lodging analysis."
+                elif node_name == "weather_agent":
+                    message = "Weather Agent completed seasonal forecast evaluations."
+                elif node_name == "budget_agent":
+                    message = "Budget Agent calculated pricing models and cost feasibility."
+                elif node_name == "itinerary_agent":
+                    message = "Itinerary Agent prepared the draft planner schedule."
+                elif node_name == "final_agent":
+                    message = "Final Polisher Agent synthesized and optimized the itinerary."
+
+                yield {
+                    "type": "node_complete",
+                    "node": node_name,
+                    "message": message,
+                    "data": {
+                        "selected_agents": node_data.get("selected_agents"),
+                        "supervisor_reasoning": node_data.get("supervisor_reasoning"),
+                        "guardrail_allowed": node_data.get("guardrail_allowed"),
+                        "guardrail_reason": node_data.get("guardrail_reason"),
+                        "flight_results": node_data.get("flight_results"),
+                        "hotel_results": node_data.get("hotel_results"),
+                        "weather_results": node_data.get("weather_results"),
+                        "budget_results": node_data.get("budget_results"),
+                        "itinerary": node_data.get("itinerary"),
+                        "final_response": node_data.get("final_response"),
+                        "approval_request": node_data.get("approval_request"),
+                    }
+                }
+
+        # Check for pause state after stream iteration
+        state = travel_graph.get_state(config)
+        if state.next and state.next[0] == "human_approval":
+            yield {
+                "type": "interrupt",
+                "message": "Human verification requested. Standing by for feedback...",
+                "data": {
+                    "thread_id": thread_id,
+                    "requires_approval": True,
+                    "approval_request": state.values.get("approval_request") or "Please review the draft plan.",
+                    "itinerary": state.values.get("itinerary") or state.values.get("final_response"),
+                    "flight_results": state.values.get("flight_results"),
+                    "hotel_results": state.values.get("hotel_results"),
+                    "weather_results": state.values.get("weather_results"),
+                    "budget_results": state.values.get("budget_results"),
+                    "selected_agents": state.values.get("selected_agents"),
+                    "supervisor_reasoning": state.values.get("supervisor_reasoning"),
+                    "trip_constraints": state.values.get("trip_constraints"),
+                }
+            }
+        else:
+            yield {
+                "type": "complete",
+                "message": "Workflow successfully finished.",
+                "data": _serialize_result(state.values, thread_id)
+            }
+
+    except Exception as exc:
+        traceback.print_exc()
+        yield {
+            "type": "error",
+            "message": f"Error running travel agent: {exc}"
+        }
+
+
+def stream_resume_travel_agent(
+    thread_id: str,
+    approved: bool,
+    feedback: str = "",
+):
+    """Resume the paused LangGraph thread and yield updates in real-time."""
+    import traceback
+    if not thread_id:
+        raise ValueError("thread_id is required to resume a travel plan.")
+
+    config = {"configurable": {"thread_id": thread_id}}
+
+    yield {
+        "type": "resume",
+        "thread_id": thread_id,
+        "message": f"Resuming agent thread with approved={approved}..."
+    }
+
+    try:
+        for chunk in travel_graph.stream(
+            Command(
+                resume={
+                    "approved": approved,
+                    "feedback": feedback.strip(),
+                }
+            ),
+            config=config,
+            stream_mode="updates",
+        ):
+            for node_name, node_data in chunk.items():
+                message = f"Node '{node_name}' completed execution."
+                if node_name == "human_approval":
+                    message = "Human review processed successfully."
+                elif node_name == "final_agent":
+                    message = "Final Polisher Agent completed the travel itinerary details."
+
+                yield {
+                    "type": "node_complete",
+                    "node": node_name,
+                    "message": message,
+                    "data": {
+                        "approved": node_data.get("approved"),
+                        "human_feedback": node_data.get("human_feedback"),
+                        "final_response": node_data.get("final_response"),
+                    }
+                }
+
+        state = travel_graph.get_state(config)
+        yield {
+            "type": "complete",
+            "message": "Workflow successfully resumed and finished.",
+            "data": _serialize_result(state.values, thread_id)
+        }
+
+    except Exception as exc:
+        traceback.print_exc()
+        yield {
+            "type": "error",
+            "message": f"Error resuming travel agent: {exc}"
+        }
+

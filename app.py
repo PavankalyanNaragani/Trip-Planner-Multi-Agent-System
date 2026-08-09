@@ -3,12 +3,12 @@ import traceback
 
 import uvicorn
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 
-from backend import run_travel_agent, resume_travel_agent
+from backend import run_travel_agent, resume_travel_agent, stream_run_travel_agent, stream_resume_travel_agent
 
 # This is kept from the original project to allow the existing synchronous
 # agent functions to call async MCP helpers inside FastAPI.
@@ -124,6 +124,88 @@ async def approve_travel_plan(request_data: ApprovalRequest):
         print("APPROVAL ERROR:", exc)
         traceback.print_exc()
 
+        return JSONResponse(
+            status_code=500,
+            content={
+                "success": False,
+                "error": str(exc),
+            },
+        )
+
+
+@app.post("/api/travel/stream")
+async def travel_planner_stream(request_data: TravelRequest):
+    try:
+        user_message = request_data.message.strip()
+        if not user_message:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "success": False,
+                    "error": "Message cannot be empty.",
+                },
+            )
+
+        async def event_generator():
+            import json
+            try:
+                for event in stream_run_travel_agent(
+                    user_message,
+                    request_data.thread_id,
+                ):
+                    yield f"data: {json.dumps(event)}\n\n"
+            except Exception as e:
+                yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+
+        return StreamingResponse(
+            event_generator(),
+            media_type="text/event-stream",
+        )
+
+    except Exception as exc:
+        print("ERROR IN STREAM:", exc)
+        traceback.print_exc()
+        return JSONResponse(
+            status_code=500,
+            content={
+                "success": False,
+                "error": str(exc),
+            },
+        )
+
+
+@app.post("/api/travel/approve/stream")
+async def approve_travel_plan_stream(request_data: ApprovalRequest):
+    try:
+        if not request_data.approved and not request_data.feedback.strip():
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "success": False,
+                    "error": "Please provide revision feedback when rejecting the draft.",
+                },
+            )
+
+        async def event_generator():
+            import json
+            try:
+                for event in stream_resume_travel_agent(
+                    request_data.thread_id,
+                    request_data.approved,
+                    request_data.feedback,
+                ):
+                    yield f"data: {json.dumps(event)}\n\n"
+            except Exception as e:
+                yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+
+        return StreamingResponse(
+            event_generator(),
+            media_type="text/event-stream",
+        )
+
+    except Exception as exc:
+        print("APPROVAL STREAM ERROR:", exc)
+        traceback.print_exc()
         return JSONResponse(
             status_code=500,
             content={
