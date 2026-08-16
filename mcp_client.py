@@ -49,7 +49,8 @@ def _require_env(name: str, value: str | None) -> str:
 
 def _subprocess_env(**updates: str | None) -> dict[str, str]:
     """
-    Preserve the current Windows/Conda environment and add MCP API keys.
+    Preserve the current Windows/Conda environment
+    and add MCP API keys.
     """
 
     env = os.environ.copy()
@@ -77,6 +78,9 @@ llm = ChatGroq(
 
 client = MultiServerMCPClient(
     {
+        # -------------------------------------------------
+        # Tavily MCP
+        # -------------------------------------------------
         "tavily": {
             "transport": "streamable_http",
             "url": (
@@ -85,24 +89,42 @@ client = MultiServerMCPClient(
             ),
         },
 
+        # -------------------------------------------------
+        # AviationStack MCP
+        # -------------------------------------------------
         "aviationstack": {
             "transport": "stdio",
+
+            # Use the uvx executable detected from
+            # the current Windows/Conda environment.
             "command": UVX_COMMAND,
+
             "args": [
-                "aviationstack-mcp",
+                "--with",
+                "mcp==1.28.1",
+                "aviationstack-mcp==1.6.0",
             ],
+
+            # IMPORTANT:
+            # Pass the ACTUAL API key loaded from .env
+            # to the AviationStack MCP subprocess.
             "env": _subprocess_env(
                 AVIATION_STACK_API_KEY=AVIATION_STACK_API_KEY,
             ),
         },
 
+        # -------------------------------------------------
+        # Weather MCP
+        # -------------------------------------------------
         "weather": {
             "transport": "stdio",
 
-            # Uses the Python executable from the active Conda environment.
+            # Uses the Python executable from the
+            # active Conda environment.
             "command": sys.executable,
 
-            # Uses the weather server inside the current project folder.
+            # Uses the weather server inside
+            # the current project folder.
             "args": [
                 str(WEATHER_SERVER_PATH),
             ],
@@ -115,6 +137,10 @@ client = MultiServerMCPClient(
 )
 
 
+# =========================================================
+# MCP tool loader
+# =========================================================
+
 async def _get_server_tool(
     server_name: str,
     tool_name: str,
@@ -122,8 +148,8 @@ async def _get_server_tool(
     """
     Load one tool from one MCP server.
 
-    This prevents a broken weather or AviationStack server from
-    crashing an unrelated Tavily request.
+    This prevents a broken weather or AviationStack
+    server from crashing an unrelated request.
     """
 
     if server_name == "tavily":
@@ -157,7 +183,8 @@ async def _get_server_tool(
                 f"{WEATHER_SERVER_PATH}"
             )
 
-    # Important: load only the requested MCP server.
+    # Important:
+    # Load only the requested MCP server.
     tools = await client.get_tools(
         server_name=server_name,
     )

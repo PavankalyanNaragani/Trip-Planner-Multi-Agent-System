@@ -31,6 +31,7 @@ from mcp_client import (
     extract_destination,
     forecast_mcp_search,
     weather_mcp_search,
+    client as mcp_client,
 )
 
 
@@ -292,7 +293,7 @@ def guardrail_blocked_agent(state: TravelState):
 
 
 # =========================
-# Flight Agent - original behavior kept
+# Flight Agent
 # =========================
 FLIGHT_AGENT_PROMPT = """
 You are a travel flight expert.
@@ -300,55 +301,574 @@ You are a travel flight expert.
 User Query:
 {query}
 
-Airport Information:
-{airport_data}
+Live/Reference AviationStack Data:
+{flight_data}
 
-Airline Information:
-{airline_data}
+Instructions:
+- If valid AviationStack flight-search data is present, use it as the primary
+  source for flight recommendations.
+- Clearly distinguish live/API-derived information from general estimates.
+- Never invent live flight numbers, live departure times, live arrival times,
+  or live flight statuses.
+- If flight search is unavailable, incompatible, historical-only, or returns
+  an error, provide useful generic flight-planning guidance from your general
+  knowledge and clearly label it as estimated/general guidance.
+- Do not treat airport/airline reference lists as proof that a route operates.
+- If the origin is a country rather than a specific airport, say that a major
+  gateway must be selected instead of inventing one.
+- Airport and airline reference data may be used to identify likely airport
+  codes and airlines, but it is not itself proof that a specific flight is
+  operating.
 
-Generate:
-1. Likely departure airport
-2. Likely arrival airport
-3. Airlines serving this route
-4. Typical flight duration
-5. Estimated airfare range
-6. Peak season pricing warning
-7. Booking advice
-
-Return concise travel guidance.
+Generate concise guidance covering:
+1. Departure and arrival airports
+2. Airlines/routes when supported by the data
+3. Typical flight duration
+4. Estimated airfare range when live pricing is unavailable
+5. Peak-season considerations
+6. Booking advice
 """
 
 
-def flight_agent(state: TravelState):
-    print("\nINSIDE FLIGHT AGENT\n")
-    query = state["user_query"]
+def _extract_text_from_mcp(result: Any) -> str:
+    """Convert common MCP content responses into searchable text."""
+    if result is None:
+        return ""
+
+    if isinstance(result, str):
+        return result
+
+    if isinstance(result, list):
+        parts = []
+        for item in result:
+            if isinstance(item, dict):
+                parts.append(str(item.get("text", item)))
+            else:
+                parts.append(str(item))
+        return "\n".join(parts)
+
+    return str(result)
+
+
+def _mcp_payload_has_error(result: Any) -> bool:
+    """Detect API/auth errors even when MCP returns them without raising."""
+    raw = _extract_text_from_mcp(result).lower()
+
+    return any(
+        marker in raw
+        for marker in (
+            '"ok": false',
+            "invalid_access_key",
+            "api_error",
+            "unauthorized",
+            "authentication",
+            '"error"',
+        )
+    )
+
+
+def _parse_json_payload(result: Any) -> Any:
+    """Best-effort extraction of JSON returned inside MCP text content."""
+    raw = _extract_text_from_mcp(result).strip()
+
+    if not raw:
+        return None
 
     try:
-        airports = asyncio.run(aviation_mcp_call("list_airports"))
-        airlines = asyncio.run(aviation_mcp_call("list_airlines"))
+        return json.loads(raw)
+    except Exception:
+        pass
 
-        print("\nAIRPORTS:", airports)
-        print("\nAIRLINES:", airlines)
+    # MCP sometimes wraps JSON in surrounding text.
+    first_obj = raw.find("{")
+    last_obj = raw.rfind("}")
+    if first_obj != -1 and last_obj > first_obj:
+        try:
+            return json.loads(raw[first_obj:last_obj + 1])
+        except Exception:
+            pass
 
+    first_arr = raw.find("[")
+    last_arr = raw.rfind("]")
+    if first_arr != -1 and last_arr > first_arr:
+        try:
+            return json.loads(raw[first_arr:last_arr + 1])
+        except Exception:
+            pass
+
+    return raw
+
+
+def _airport_code_from_reference(
+    reference_result: Any,
+    location: str,
+) -> str | None:
+    """
+    Resolve a city/country/airport name to an IATA code using the
+    AviationStack airport reference response.
+    """
+    if not location:
+        return None
+
+    location = str(location).strip().lower()
+
+    # AviationStack reference endpoints can return a limited/default page.
+    # Resolve common explicit airport/city names safely as a code convenience.
+    # This does NOT mean a flight on that route is live or available.
+    common_iata = {
+        "hyderabad airport": "HYD",
+        "hyderabad": "HYD",
+        "rajiv gandhi international airport": "HYD",
+        "paris charles de gaulle airport": "CDG",
+        "charles de gaulle": "CDG",
+        "cdg": "CDG",
+        "paris orly airport": "ORY",
+        "orly": "ORY",
+        "ory": "ORY",
+        "dhaka": "DAC",
+        "hazrat shahjalal international airport": "DAC",
+        "dubai": "DXB",
+        "dubai international airport": "DXB",
+        "bangkok": "BKK",
+        "suvarnabhumi airport": "BKK",
+        "phuket": "HKT",
+        "phuket international airport": "HKT",
+    }
+
+    if location in common_iata:
+        return common_iata[location]
+
+    payload = _parse_json_payload(reference_result)
+
+    if not isinstance(payload, list):
+        return None
+
+    # Prefer exact IATA/city-name matches, then partial matches.
+    candidates = []
+
+    for airport in payload:
+        if not isinstance(airport, dict):
+            continue
+
+        airport_name = str(airport.get("airport_name") or "").lower()
+        iata = str(airport.get("iata_code") or "").strip().upper()
+        city_iata = str(airport.get("city_iata_code") or "").strip().upper()
+        country_name = str(airport.get("country_name") or "").lower()
+
+        if not iata:
+            continue
+
+        score = 0
+
+        if location == airport_name:
+            score += 100
+        if location == iata.lower():
+            score += 100
+        if location == city_iata.lower():
+            score += 100
+        if location == country_name:
+            score += 20
+        if location in airport_name:
+            score += 50
+        if location in country_name:
+            score += 20
+
+        if score:
+            candidates.append((score, iata))
+
+    if not candidates:
+        return None
+
+    candidates.sort(reverse=True)
+    return candidates[0][1]
+
+
+async def _find_aviation_flight_tool():
+    """
+    Discover the actual flight-search tool exposed by the installed
+    aviationstack-mcp package instead of hard-coding a tool name.
+    """
+    tools = await mcp_client.get_tools(server_name="aviationstack")
+
+    # Never treat airport/airline reference tools as flight-search tools.
+    candidates = []
+
+    for tool in tools:
+        name = str(getattr(tool, "name", "")).lower()
+        description = str(getattr(tool, "description", "")).lower()
+        searchable = f"{name} {description}"
+
+        # Historical/date-reference tools are not generic live route-search
+        # tools. If the installed MCP package exposes only such a tool, let
+        # the existing LLM fallback handle the flight guidance.
+        is_historical = any(
+            word in name
+            for word in (
+                "historical",
+                "by_date",
+                "bydate",
+            )
+        )
+
+        if (
+            any(
+                word in searchable
+                for word in (
+                    "flight",
+                    "route",
+                    "schedule",
+                    "departure",
+                    "arrival",
+                )
+            )
+            and not any(
+                word in name
+                for word in (
+                    "airport",
+                    "airline",
+                )
+            )
+            and not is_historical
+        ):
+            candidates.append(tool)
+
+    if not candidates:
+        return None
+
+    # Prefer names that explicitly look like flight retrieval/search tools.
+    priority = (
+        "search_flights",
+        "get_flights",
+        "flight_search",
+        "list_flights",
+        "flights",
+        "flight",
+    )
+
+    for preferred in priority:
+        for tool in candidates:
+            if preferred in str(getattr(tool, "name", "")).lower():
+                return tool
+
+    return candidates[0]
+
+
+def _build_flight_tool_args(
+    tool: Any,
+    origin_code: str | None,
+    destination_code: str | None,
+) -> dict[str, Any]:
+    """
+    Build arguments from the actual discovered tool schema.
+
+    Different MCP versions may use origin/destination, dep_iata/arr_iata,
+    departure_iata/arrival_iata, etc. This keeps backend.py resilient without
+    assuming one exact schema.
+    """
+    schema = getattr(tool, "args_schema", None)
+    fields = getattr(schema, "model_fields", None)
+
+    if fields is None:
+        fields = getattr(schema, "__fields__", None)
+
+    if not fields:
+        return {}
+
+    args: dict[str, Any] = {}
+
+    for field_name in fields:
+        name = str(field_name).lower()
+
+        if any(
+            token in name
+            for token in (
+                "dep_iata",
+                "departure_iata",
+                "origin_iata",
+                "source_iata",
+                "from_iata",
+                "dep_airport",
+                "origin_airport",
+                "departure_airport",
+            )
+        ):
+            if origin_code:
+                args[field_name] = origin_code
+
+        elif any(
+            token in name
+            for token in (
+                "arr_iata",
+                "arrival_iata",
+                "destination_iata",
+                "dest_iata",
+                "to_iata",
+                "arr_airport",
+                "destination_airport",
+                "arrival_airport",
+            )
+        ):
+            if destination_code:
+                args[field_name] = destination_code
+
+        elif name in {
+            "dep",
+            "departure",
+            "origin",
+            "from",
+            "source",
+        }:
+            if origin_code:
+                args[field_name] = origin_code
+
+        elif name in {
+            "arr",
+            "arrival",
+            "destination",
+            "dest",
+            "to",
+        }:
+            if destination_code:
+                args[field_name] = destination_code
+
+    return args
+
+
+def flight_agent(state: TravelState):
+    print("\nINSIDE FLIGHT AGENT\n", flush=True)
+
+    query = state["user_query"]
+    constraints = state.get("trip_constraints", {})
+
+    airports = None
+    airlines = None
+    live_flight_data = None
+    live_search_error = None
+
+    try:
+        # Keep the existing AviationStack reference calls.
+        airports = asyncio.run(
+            aviation_mcp_call("list_airports")
+        )
+
+        airlines = asyncio.run(
+            aviation_mcp_call("list_airlines")
+        )
+
+        print("\nAIRPORTS:", airports, flush=True)
+        print("\nAIRLINES:", airlines, flush=True)
+
+        if _mcp_payload_has_error(airports):
+            raise RuntimeError(
+                "AviationStack airport reference request returned an API error."
+            )
+
+        if _mcp_payload_has_error(airlines):
+            raise RuntimeError(
+                "AviationStack airline reference request returned an API error."
+            )
+
+        # Resolve the origin/destination from supervisor constraints.
+        origin = str(
+            constraints.get("origin")
+            or ""
+        ).strip()
+
+        destination = str(
+            constraints.get("destination")
+            or ""
+        ).strip()
+
+        # If the supervisor did not extract them, use the user's query as the
+        # source of truth and let the LLM extract the two locations.
+        if not origin or not destination:
+            extraction_prompt = f"""
+Extract the origin and destination from this travel request.
+
+Return strict JSON only:
+{{
+  "origin": "",
+  "destination": ""
+}}
+
+Travel request:
+{query}
+"""
+
+            extracted = _json_from_llm(
+                _llm_text(
+                    "Extract travel route information. Return JSON only.",
+                    extraction_prompt,
+                )
+            )
+
+            origin = str(
+                extracted.get("origin") or origin
+            ).strip()
+
+            destination = str(
+                extracted.get("destination") or destination
+            ).strip()
+
+        origin_code = _airport_code_from_reference(
+            airports,
+            origin,
+        )
+
+        destination_code = _airport_code_from_reference(
+            airports,
+            destination,
+        )
+
+        print(
+            f"FLIGHT ROUTE: {origin} ({origin_code}) -> "
+            f"{destination} ({destination_code})",
+            flush=True,
+        )
+
+        # Discover the real flight-search tool exposed by aviationstack-mcp.
+        flight_tool = asyncio.run(
+            _find_aviation_flight_tool()
+        )
+
+        if flight_tool is None:
+            raise RuntimeError(
+                "No compatible live route-search tool was exposed by "
+                "aviationstack-mcp. Available AviationStack reference tools "
+                "are not sufficient for a live origin-to-destination search."
+            )
+
+        flight_tool_args = _build_flight_tool_args(
+            flight_tool,
+            origin_code,
+            destination_code,
+        )
+
+        print(
+            "AVIATION FLIGHT TOOL:",
+            flight_tool.name,
+            flush=True,
+        )
+
+        print(
+            "AVIATION FLIGHT TOOL ARGS:",
+            flight_tool_args,
+            flush=True,
+        )
+
+        # If the discovered tool requires route arguments and we couldn't map
+        # them, don't fabricate a call. Use the generic fallback instead.
+        if not flight_tool_args:
+            raise RuntimeError(
+                f"Could not map origin/destination to the schema of "
+                f"AviationStack tool '{flight_tool.name}'."
+            )
+
+        live_flight_data = asyncio.run(
+            flight_tool.ainvoke(flight_tool_args)
+        )
+
+        print(
+            "\nLIVE FLIGHT DATA:",
+            live_flight_data,
+            flush=True,
+        )
+
+        if _mcp_payload_has_error(live_flight_data):
+            raise RuntimeError(
+                "AviationStack flight search returned an API error."
+            )
+
+    except Exception as exc:
+        live_search_error = (
+            f"{type(exc).__name__}: {exc}"
+        )
+
+        print(
+            "FLIGHT SEARCH FALLBACK:",
+            live_search_error,
+            flush=True,
+        )
+
+    # ---------------------------------------------------------
+    # LLM response generation
+    # ---------------------------------------------------------
+    if live_search_error:
+        flight_data_for_llm = f"""
+AviationStack live flight search is unavailable.
+
+Reason:
+{live_search_error}
+
+Airport reference data:
+{str(airports)[:3000] if airports else "Unavailable"}
+
+Airline reference data:
+{str(airlines)[:3000] if airlines else "Unavailable"}
+
+Use general travel knowledge for the response, but clearly label
+flight duration, airline suggestions, and airfare as estimates.
+Do not invent live flight numbers, live schedules, or live statuses.
+"""
+    else:
+        flight_data_for_llm = f"""
+LIVE AVIATIONSTACK FLIGHT SEARCH RESULT:
+{str(live_flight_data)[:6000]}
+
+AIRPORT REFERENCE DATA:
+{str(airports)[:2000]}
+
+AIRLINE REFERENCE DATA:
+{str(airlines)[:2000]}
+"""
+
+    try:
         prompt = FLIGHT_AGENT_PROMPT.format(
             query=query,
-            airport_data=str(airports)[:3000],
-            airline_data=str(airlines)[:3000],
+            flight_data=flight_data_for_llm,
         )
 
         response = llm.invoke(
             [
-                SystemMessage(content="You are an expert travel flight planner."),
+                SystemMessage(
+                    content="You are an expert travel flight planner."
+                ),
                 HumanMessage(content=prompt),
             ]
         )
-        flight_data = response.content
+
+        flight_data = str(response.content)
+
+        if live_search_error:
+            flight_data = (
+                "Live AviationStack flight search was unavailable. "
+                "The following is general/estimated flight guidance, "
+                "not live flight data.\n\n"
+                f"{flight_data}"
+            )
+
     except Exception as exc:
-        flight_data = f"Flight information unavailable: {exc}"
+        print(
+            "FLIGHT AGENT LLM ERROR:",
+            f"{type(exc).__name__}: {exc}",
+            flush=True,
+        )
+
+        # Preserve the requested generic fallback behavior.
+        flight_data = (
+            "Live flight information is temporarily unavailable. "
+            "General flight-planning guidance can be provided, but "
+            "current schedules and prices should be verified with "
+            "the airline or booking provider."
+        )
 
     return {
         "flight_results": flight_data,
-        "messages": [AIMessage(content="Flight recommendations generated")],
+        "messages": [
+            AIMessage(
+                content="Flight recommendations generated"
+            )
+        ],
         "llm_calls": state.get("llm_calls", 0) + 1,
     }
 
@@ -894,7 +1414,7 @@ def stream_run_travel_agent(user_input: str, thread_id: str | None = None):
                 if node_name == "supervisor":
                     message = "Supervisor reviewed query constraints and completed routing."
                 elif node_name == "flight_agent":
-                    message = "Flight Agent gathered route recommendations and estimates."
+                    message = "Flight Agent processed AviationStack flight data with LLM fallback when live search was unavailable."
                 elif node_name == "hotel_agent":
                     message = "Hotel Agent finished neighborhood and lodging analysis."
                 elif node_name == "weather_agent":
@@ -1020,4 +1540,3 @@ def stream_resume_travel_agent(
             "type": "error",
             "message": f"Error resuming travel agent: {exc}"
         }
-
