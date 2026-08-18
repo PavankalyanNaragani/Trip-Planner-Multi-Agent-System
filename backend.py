@@ -23,7 +23,7 @@ from langchain_core.messages import (
     SystemMessage,
 )
 from langchain_groq import ChatGroq
-
+from langchain_google_genai import ChatGoogleGenerativeAI
 
 from mcp_client import (
     tavily_mcp_search,
@@ -51,17 +51,21 @@ def get_database_url():
     return database_url
 
 
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+#GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-if not GROQ_API_KEY:
-    raise ValueError("GROQ_API_KEY is missing. Please add it to your .env file.")
+#if not GROQ_API_KEY:
+#    raise ValueError("GROQ_API_KEY is missing. Please add it to your .env file.")
+
+if not GEMINI_API_KEY:
+    raise ValueError("GEMINI_API_KEY is missing. Please add it to your .env file.")
 
 # =========================
 # LLM - original model kept
 # =========================
-llm = ChatGroq(
-    model="llama-3.3-70b-versatile",
-    api_key=GROQ_API_KEY,
+llm = ChatGoogleGenerativeAI(
+    model="gemini-2.5-flash",
+    google_api_key=GEMINI_API_KEY,
 )
 
 # =========================
