@@ -142,6 +142,9 @@ mnesia/
 rabbitmq/
 rabbitmq-data/
 
+# Excalidraw files
+excalidraw_files/
+
 # ActiveMQ
 activemq-data/
 
